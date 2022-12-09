@@ -1,0 +1,1084 @@
+# Video Device
+
+The virtio video encoder and decoder devices provide support for host-accelerated video encoding and decoding. Despite being different devices types, they use the same protocol and general flow.
+
+## Device ID
+
+30
+: encoder device
+
+31
+: decoder device
+
+## Virtqueues
+
+0
+: commandq - queue for driver commands and device responses to these commands.
+
+1
+: eventq - queue for events sent by the device to the driver.
+
+## Feature bits
+
+VIRTIO_VIDEO_F_RESOURCE_GUEST_PAGES (0)
+: Guest pages can be used as the backing memory of resources.
+
+VIRTIO_VIDEO_F_RESOURCE_NON_CONTIG (1)
+: The device can use non-contiguous guest memory as the backing memory of resources. Only meaningful if VIRTIO_VIDEO_F_RESOURCE_GUEST_PAGES is also set.
+
+VIRTIO_VIDEO_F_RESOURCE_DYNAMIC (2)
+: The device supports re-attaching memory to resources while streaming.
+
+VIRTIO_VIDEO_F_RESOURCE_VIRTIO_OBJECT (3)
+: Objects exported by another virtio device can be used as the backing memory of resources.
+
+### Device requirements
+
+The device MUST present at least one of VIRTIO_VIDEO_F_RESOURCE_GUEST_PAGES or VIRTIO_VIDEO_F_RESOURCE_VIRTIO_OBJECT, since the absence of both bits would mean that no memory can be used at all for resources.
+
+### Driver requirements
+
+The driver MUST negotiate at least one of the VIRTIO_VIDEO_F_RESOURCE_GUEST_PAGES and VIRTIO_VIDEO_F_RESOURCE_VIRTIO_OBJECT features.
+
+If the VIRTIO_VIDEO_F_RESOURCE_NON_CONTIG is not present, the driver MUST use physically contiguous memory for all the buffers it allocates.
+
+## Device configuration layout
+
+Video device configuration uses the following layout:
+
+```
+struct virtio_video_config {
+        le32 version;
+        le32 caps_length;
+};
+```
+
+`version`
+: is the protocol version that the device understands.
+
+`caps_length`
+: is the minumum length in bytes that a device-writable buffer must  have in order to receive the response to VIRTIO_VIDEO_CMD_DEVICE_QUERY_CAPS.
+
+### Device Requirements
+
+As there is currently only one version of the protocol, the device MUST set the `version` field to 0.
+
+The device MUST set the `caps_length` field to a value equal to the response size of VIRTIO_VIDEO_CMD_DEVICE_QUERY_CAPS.
+
+## Device Initialization
+
+1. The driver reads the feature bits and negotiates the features it needs.
+2. The driver sets up the commandq.
+3. The driver confirms that it supports the version of the protocol advertized in the `version` field of the configuration space.
+4. The driver reads the `caps_length` field of the configuration space and prepares a buffer of at least that size.
+5. The driver sends that buffer on the commandq with the VIRTIO_VIDEO_CMD_DEVICE_QUERY_CAPS command.
+6. The driver receives the reponse from the device, and parses its capabilities.
+
+## Device Operation
+
+The commandq is used by the driver to send commands to the device and to receive the device's response via used buffers.
+
+The driver can create new streams using the VIRTIO_VIDEO_CMD_STREAM_CREATE command. Each stream has two resource queues (not to be confused with the virtio queues) called INPUT and OUTPUT. The INPUT queue accepts driver-filled input data for the device (bitstream data for a decoder ; input frames for an encoder), while the OUTPUT queue receives resources to be filled by the device as a result of processing the INPUT queue (decoded frames for a decoder ; encoded bitstream data for an encoder).
+
+A resource is a set of memory buffers that contain a unit of data that the device can process or produce. Most resources will only have one buffer (like bitstreams and single-planar images), but frames using a multi-planar format will have several.
+
+Before resources can be submitted to a queue, backing memory must be attached to them using VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING. The exact form of that memory is negotiated using the feature flags.
+
+The INPUT and OUTPUT queues are effectively independent, and the driver can fill them without caring about the other queue. In particular there is no need to queue input and output resources in pairs: one input resource can result in zero to many output resources being produced.
+
+Resources are queued to the INPUT or OUTPUT queue using the VIRTIO_VIDEO_CMD_RESOURCE_QUEUE command. The device replies to this command when an input resource has been fully processed and can be reused by the driver, or when an output resource has been filled by the device as a result of processing.
+
+Parameters of the stream can be obtained and configured using VIRTIO_VIDEO_CMD_STREAM_GET_PARAM and VIRTIO_VIDEO_CMD_STREAM_SET_PARAM. Available parameters depend on on the device type and are detailed in section \ref{sec:Device Types / Video Device / Parameters}.
+
+The device may detect stream-related events that require intervention from the driver and signals them on the eventq. One example is a dynamic resolution change while decoding a stream, which may require the driver to reallocate the backing memory of its output resources to fit the new resolution.
+
+### Driver requirements
+
+Descriptor chains sent to the commandq by the driver MUST include at least one device-writable descriptor of a size sufficient to receive the response to the queued command.
+
+### Device requirements
+
+Responses to a command MUST be written by the device in the first device-writable descriptor of the descriptor chain from which the command came.
+
+### Device Operation: Command Virtqueue
+
+This section details the commands that can be sent on the commandq by the driver, as well as the responses that the device will write.
+
+Different structures are used for each command and response. A command structure starts with the requested command code, defined as follows:
+
+```
+/* Device */
+#define VIRTIO_VIDEO_CMD_DEVICE_QUERY_CAPS       0x100
+
+/* Stream */
+#define VIRTIO_VIDEO_CMD_STREAM_CREATE           0x200
+#define VIRTIO_VIDEO_CMD_STREAM_DESTROY          0x201
+#define VIRTIO_VIDEO_CMD_STREAM_DRAIN            0x203
+#define VIRTIO_VIDEO_CMD_STREAM_STOP             0x204
+#define VIRTIO_VIDEO_CMD_STREAM_GET_PARAM        0x205
+#define VIRTIO_VIDEO_CMD_STREAM_SET_PARAM        0x206
+
+/* Resource*/
+#define VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING 0x400
+#define VIRTIO_VIDEO_CMD_RESOURCE_QUEUE          0x401
+};
+```
+
+A response structure starts with the result of the requested command, defined as follows:
+
+```
+/* Success */
+#define VIRTIO_VIDEO_RESULT_OK                          0x000
+
+/* Error */
+#define VIRTIO_VIDEO_RESULT_ERR_INVALID_COMMAND         0x100
+#define VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION       0x101
+#define VIRTIO_VIDEO_RESULT_ERR_INVALID_STREAM_ID       0x102
+#define VIRTIO_VIDEO_RESULT_ERR_INVALID_RESOURCE_ID     0x103
+#define VIRTIO_VIDEO_RESULT_ERR_INVALID_ARGUMENT        0x104
+#define VIRTIO_VIDEO_RESULT_ERR_CANCELED                0x105
+#define VIRTIO_VIDEO_RESULT_ERR_OUT_OF_MEMORY           0x106
+```
+
+For response structures carrying an error code, the rest of the structure is considered invalid. Only response structures carrying VIRTIO_VIDEO_RESULT_OK shall be examined further by the driver.
+
+#### Device requirements
+
+The device MUST return VIRTIO_VIDEO_RESULT_ERR_INVALID_COMMAND to any non-existing command code.
+
+#### Driver requirements
+
+The driver MUST NOT interpret the rest of a response which result is not VIRTIO_VIDEO_RESULT_OK.
+
+### Device Operation: Device Commands
+
+Device capabilities are retrieved using the VIRTIO_VIDEO_CMD_DEVICE_QUERY_CAPS command, which returns arrays of formats supported by the input and output queues.
+
+#### VIRTIO_VIDEO_CMD_DEVICE_QUERY_CAPS
+
+Retrieve device capabilities.
+
+The driver sends this command with `struct virtio_video_device_query_caps`:
+
+```
+struct virtio_video_device_query_caps {
+        le32 cmd_type; /* VIRTIO_VIDEO_CMD_DEVICE_QUERY_CAPS */
+};
+```
+
+The device responds with `struct virtio_video_device_query_caps_resp`:
+
+```
+struct virtio_video_device_query_caps_resp {
+        le32 result; /* VIRTIO_VIDEO_RESULT_* */
+        le32 num_bitstream_formats;
+        le32 num_image_formats;
+        /**
+         * Followed by
+         * struct virtio_video_bitstream_format_desc bitstream_formats[num_bitstream_formats];
+         */
+        /**
+         * Followed by
+         * struct virtio_video_image_format_desc image_formats[num_image_formats]
+         */
+};
+```
+
+<!-- TODO this is not good - the image formats should depend on the currently set bitstream format, so we need a more dynamic mechanism -->
+
+`result`
+: is
+
+    VIRTIO_VIDEO_RESULT_OK
+    : if the operation succeeded,
+
+    VIRTIO_VIDEO_RESULT_ERR_OUT_OF_MEMORY
+    : if the descriptor was smaller than the defined \field{caps_length} in the video device configuration.
+
+`num_bitstream_formats`
+: is the number of supported bitstream formats.
+
+`num_image_formats`
+: is the number of supported image formats.
+
+`bitstream_formats`
+: is an array of size `num_bitstream_formats` containing the supported encoded formats. These correspond to the formats that can be set on the INPUT queue for a decoder, and on the OUTPUT queue for an encoder. For a description of bitstream formats, see \ref{sec:Device Types / Video Device / Supported formats / Bitstream formats}.
+
+`image_formats`
+: is an array of size `num_image_formats` containing the supported image formats. These correspond to the formats that can be set on the OUTPUT queue for a decoder, and on the INPUT queue for an encoder. For a description of image formats, see \ref{sec:Device Types / Video Device / Supported formats / Image formats}.
+
+<!-- TODO: masks of which image formats are supported for each bitstream one? -->
+
+##### Driver requirements
+
+`cmd_type` MUST be set to VIRTIO_VIDEO_CMD_DEVICE_QUERY_CAPS by the driver.
+
+##### Device requirements
+
+The device MUST write the two `bitstream_formats` and `image_formats` arrays, of length `num_bitstream_formats` and `num_image_formats`, respectively.
+
+The total size of the response MUST be equal to `caps_length` bytes, as reported by the device configuration.
+
+### Device Operation: Stream commands
+
+Stream commands allow the creation, destruction, and flow control of a stream.
+
+#### VIRTIO_VIDEO_CMD_STREAM_CREATE
+
+Create a new stream using the device.
+
+The driver sends this command with `struct virtio_video_stream_create`:
+
+```
+struct virtio_video_stream_create {
+        le32 cmd_type; /* VIRTIO_VIDEO_CMD_STREAM_CREATE */
+};
+```
+
+The device responds with `struct virtio_video_stream_create_resp`:
+
+```
+struct virtio_video_stream_create_resp {
+        le32 result; /* VIRTIO_VIDEO_RESULT_* */
+        le32 stream_id;
+};
+```
+
+`result`
+: is
+
+    VIRTIO_VIDEO_RESULT_OK
+    : if the operation succeeded,
+
+    VIRTIO_VIDEO_RESULT_ERR_OUT_OF_MEMORY
+    : if the limit of simultaneous streams has been reached by the device and no more can be created.
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_COMMAND
+    : if the stream cannot be created due to an unexpected device issue.
+
+`stream_id`
+: is the ID of the created stream allocated by the device.
+
+##### Driver requirements
+
+`cmd_type` MUST be set to VIRTIO_VIDEO_CMD_STREAM_CREATE by the driver.
+
+##### Device requirements
+
+`stream_id` MUST be set to an identifier that is unique to that stream for as long as it lives.
+
+#### VIRTIO_VIDEO_CMD_STREAM_DESTROY
+
+Destroy a video stream and all its resources. Any activity on the stream is halted and all resources released by the time the response is received by the driver.
+
+The driver sends this command with `struct virtio_video_stream_destroy`:
+
+```
+struct virtio_video_stream_destroy {
+         le32 cmd_type; /* VIRTIO_VIDEO_CMD_STREAM_DESTROY */
+         le32 stream_id;
+};
+```
+
+`stream_id`
+: is the ID of the stream to be destroyed, as previously returned by VIRTIO_VIDEO_CMD_STREAM_CREATE.
+
+The device responds with `struct virtio_video_stream_destroy_resp`:
+
+```
+struct virtio_video_stream_destroy_resp {
+         le32 result; /* VIRTIO_VIDEO_RESULT_* */
+};
+```
+
+`result`
+: is
+
+    VIRTIO_VIDEO_RESULT_OK
+    : if the operation succeeded,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_STREAM_ID
+    : if the requested stream ID does not exist.
+
+##### Driver requirements
+
+`cmd_type` MUST be set to VIRTIO_VIDEO_CMD_STREAM_DESTROY by the driver.
+
+`stream_id` MUST be set to a valid stream ID previously returned by VIRTIO_VIDEO_CMD_STREAM_CREATE.
+
+The driver MUST stop using `stream_id` as a valid stream after it received the response to this command.
+
+##### Device requirements
+
+Before the device sends a response, it MUST respond with VIRTIO_VIDEO_RESULT_ERR_CANCELED to all pending commands.
+
+After responding to this command, the device MUST reply with VIRTIO_VIDEO_RESULT_ERR_INVALID_STREAM_ID to any command related to this stream.
+
+#### VIRTIO_VIDEO_CMD_STREAM_DRAIN
+
+Complete processing of all currently queued input resources.
+
+VIRTIO_VIDEO_CMD_STREAM_DRAIN ensures that all sent VIRTIO_VIDEO_CMD_RESOURCE_QUEUE commands on the INPUT queue are processed by the device and that the resulting output resources are available to the driver.
+
+The driver sends this command with `struct virtio_video_stream_drain`:
+
+```
+struct virtio_video_stream_drain {
+        le32 cmd_type; /* VIRTIO_VIDEO_CMD_STREAM_DRAIN */
+        le32 stream_id;
+};
+```
+
+`stream_id`
+: is the ID of the stream to drain, as previously returned by VIRTIO_VIDEO_CMD_STREAM_CREATE.
+
+The device responds with `struct virtio_video_stream_drain_resp` once the drain operation is completed:
+
+```
+struct virtio_video_stream_drain_resp {
+        le32 result; /* VIRTIO_VIDEO_RESULT_* */
+};
+```
+
+`result`
+: is
+
+    VIRTIO_VIDEO_RESULT_OK
+    : if the operation succeeded,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_STREAM_ID
+    : if the requested stream does not exist,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION
+    : if a drain operation is already in progress for this stream,
+
+    VIRTIO_VIDEO_RESULT_ERR_CANCELED
+    : if the operation has been canceled by a VIRTIO_VIDEO_CMD_STREAM_STOP or VIRTIO_VIDEO_CMD_STREAM_DESTROY operation.
+
+##### Driver requirements
+
+`cmd_type` MUST be set to VIRTIO_VIDEO_CMD_STREAM_DRAIN by the driver.
+
+`stream_id` MUST be set to a valid stream ID previously returned by VIRTIO_VIDEO_CMD_STREAM_CREATE.
+
+The driver MUST keep queueing output resources until it gets the response to this command. Failure to do so may result in the device stalling as it waits for output resources to write into.
+
+The driver MUST account for the fact that the response to this command might come out-of-order (i.e. after other commands sent to the device), and that it can be interrupted.
+
+##### Device requirements
+
+Before the device sends the response, it MUST process and respond to all the VIRTIO_VIDEO_CMD_RESOURCE_QUEUE commands on the INPUT queue that were sent before the drain command, and make all the corresponding output resources available to the driver by responding to their VIRTIO_VIDEO_CMD_RESOURCE_QUEUE command.
+
+While the device is processing the command, it MUST return VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION to the VIRTIO_VIDEO_CMD_STREAM_DRAIN command.
+
+If the command is interrupted due to a VIRTIO_VIDEO_CMD_STREAM_STOP or VIRTIO_VIDEO_CMD_STREAM_DESTROY operation, the device MUST respond with VIRTIO_VIDEO_RESULT_ERR_CANCELED.
+
+#### VIRTIO_VIDEO_CMD_STREAM_STOP
+
+Immediately return all queued input resources without processing them and stop operation until new input resources are queued.
+
+<!-- TODO should we return buffers from both queues? Probably not? -->
+
+This command is mostly useful for decoders that need to quickly jump from one point of the stream to another (i.e. seeking), or in order to stop processing as quickly as possible.
+
+The driver sends this command with `struct virtio_video_stream_stop`:
+
+```
+struct virtio_video_stream_stop {
+        le32 cmd_type; /* VIRTIO_VIDEO_CMD_STREAM_STOP */
+        le32 stream_id;
+};
+```
+
+`stream_id`
+: is the ID of the stream to stop, as previously returned by VIRTIO_VIDEO_CMD_STREAM_CREATE.
+
+The device responds with `struct virtio_video_stream_stop_resp` after the response for all previously queued input resources has been sent:
+
+```
+struct virtio_video_stream_stop_resp {
+        le32 result; /* VIRTIO_VIDEO_RESULT_* */
+};
+```
+
+`result`
+: is
+
+    VIRTIO_VIDEO_RESULT_OK
+    : if the operation succeeded,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_STREAM_ID
+    : if the requested stream does not exist,
+
+##### Driver requirements
+
+`cmd_type` MUST be set to VIRTIO_VIDEO_CMD_STREAM_STOP by the driver.
+
+`stream_id` MUST be set to a valid stream ID previously returned by VIRTIO_VIDEO_CMD_STREAM_CREATE.
+
+Upon receiving the response to this command, the driver SHOULD process (or drop) any output resource before resuming operation by queueing new input resources.
+
+Upon receiving the response to this command, the driver CAN modify the `struct virtio_video_params_resources` parameter corresponding to the INPUT queue, and subsequently attach new backing memory to the input resources using the VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING command.
+
+##### Device requirements
+
+The device MUST return VIRTIO_VIDEO_RESULT_ERR_CANCELED to any pending VIRTIO_VIDEO_CMD_STREAM_DRAIN and VIRTIO_VIDEO_CMD_RESOURCE_QUEUE command on the INPUT queue before responding to this command. Pending commands on the output queue are not affected.
+
+The device MUST interrupt operation as quickly as possible, and not be dependent on output resources being queued by the driver.
+
+Upon resuming processing, the device CAN skip input data until it finds a point that allows it to resume operation properly (e.g. until a keyframe it found in the input stream of a decoder).
+
+#### VIRTIO_VIDEO_CMD_STREAM_GET_PARAM
+
+Read the value of a parameter of the given stream. Available parameters depend on the device type and are listed in \ref{sec:Device Types / Video Device / Parameters}.
+
+```
+struct virtio_video_stream_get_param {
+        le32 cmd_type; /* VIRTIO_VIDEO_CMD_STREAM_GET_PARAM */
+        le32 stream_id;
+        le32 param_type; /* VIRTIO_VIDEO_PARAMS_* */
+        u8 padding[4];
+}
+```
+
+`stream_id`
+: is the ID of the stream we want to get a parameter from.
+
+`param_type`
+: is one of the VIRTIO_VIDEO_PARAMS_* values indicating the parameter we want to get.
+
+The device responds with `struct virtio_video_stream_param_resp`:
+
+```
+struct virtio_video_stream_param_resp {
+        le32 result; /* VIRTIO_VIDEO_RESULT_* */
+        union virtio_video_stream_params param;
+};
+```
+
+`result`
+: is
+
+    VIRTIO_VIDEO_RESULT_OK
+    : if the operation succeeded,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_STREAM_ID
+    : if the requested stream does not exist,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_ARGUMENT
+    : if the `param_type` argument is invalid for the device,
+
+`param`
+: is the value of the requested parameter, if `result` is VIRTIO_VIDEO_RESULT_OK.
+
+##### Driver requirements
+
+`cmd_type` MUST be set to VIRTIO_VIDEO_CMD_STREAM_GET_PARAM by the driver.
+
+`stream_id` MUST be set to a valid stream ID previously returned by VIRTIO_VIDEO_CMD_STREAM_CREATE.
+
+`param_type` MUST be set to a parameter type that is valid for the device.
+
+#### VIRTIO_VIDEO_CMD_STREAM_SET_PARAM
+
+Write the value of a parameter of the given stream, and return the value actually set by the device. Available parameters depend on the device type and are listed in \ref{sec:Device Types / Video Device / Parameters}.
+
+```
+struct virtio_video_stream_set_param {
+        le32 cmd_type; /* VIRTIO_VIDEO_CMD_STREAM_SET_PARAM */
+        le32 stream_id;
+        le32 param_type; /* VIRTIO_VIDEO_PARAMS_* */
+        u8 padding[4];
+        union virtio_video_stream_params param;
+}
+```
+
+`stream_id`
+: is the ID of the stream we want to set a parameter for.
+
+`param_type`
+: is one of the VIRTIO_VIDEO_PARAMS_* values indicating the parameter we want to set.
+
+The device responds with `struct virtio_video_stream_param_resp`:
+
+```
+struct virtio_video_stream_param_resp {
+        le32 result; /* VIRTIO_VIDEO_RESULT_* */
+        union virtio_video_stream_params param;
+};
+```
+
+`result`
+: is
+
+    VIRTIO_VIDEO_RESULT_OK
+    : if the operation succeeded,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_STREAM_ID
+    : if the requested stream does not exist,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_ARGUMENT
+    : if the `param_type` argument is invalid for the device,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION
+    : if the requested parameter cannot be modified at this moment.
+
+`param`
+: is the actual value of the parameter set by the device, if `result` is VIRTIO_VIDEO_RESULT_OK. The value set by the device may differ from the requested value depending on the device's capabilities.
+
+Outside of the error cases described above, setting a parameter does not fail. If the device cannot apply the parameter as requested, it will adjust it to the closest setting it supports, and return that value to the driver. It is then up to the driver to decide whether it can work within the range of parameters supported by the device.
+
+##### Driver requirements
+
+`cmd_type` MUST be set to VIRTIO_VIDEO_CMD_STREAM_SET_PARAM by the driver.
+
+`stream_id` MUST be set to a valid stream ID previously returned by VIRTIO_VIDEO_CMD_STREAM_CREATE.
+
+`param_type` MUST be set to a parameter type that is valid for the device, and `param` MUST be filled as the union member corresponding to `param_type`.
+
+The driver MUST check the actual value of the parameter as set by the device and work with this value, or fail properly if it cannot.
+
+##### Device requirements
+
+The device MUST NOT return an error if the value requested by the driver cannot be applied as-is. Instead, the device MUST set the parameter to the closest supported value to the one requested by the driver.
+
+### Device Operation: Resource Commands
+
+Resource commands manage the memory backing of individual resources and allow to queue them so the device can process them.
+
+#### VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING
+
+Assign backing memory to a resource.
+
+The driver sends this command with `struct virtio_video_resource_attach_backing`:
+
+```
+#define VIRTIO_VIDEO_QUEUE_TYPE_INPUT       0
+#define VIRTIO_VIDEO_QUEUE_TYPE_OUTPUT      1
+
+struct virtio_video_resource_attach_backing {
+        le32 cmd_type; /* VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING */
+        le32 stream_id;
+        le32 queue_type; /* VIRTIO_VIDEO_QUEUE_TYPE_* */
+        le32 resource_id;
+        union virtio_video_resource resources[];
+};
+```
+
+`stream_id`
+: is the ID of a valid stream.
+
+`queue_type`
+: is the direction of the queue.
+
+`resource_id`
+: is the ID of the resource to be attached to.
+
+`resources`
+: specifies memory regions to attach.
+
+The union `virtio_video_resource` is defined as follows:
+
+```
+union virtio_video_resource {
+        struct virtio_video_resource_sg_list sg_list;
+        struct virtio_video_resource_object object;
+};
+```
+
+`sg_list`
+: represents a scatter-gather list. This variant can be used when the `mem_type` member of the `virtio_video_params_resources` corresponding to the queue is set to VIRTIO_VIDEO_MEM_TYPE_GUEST_PAGES (see \ref{sec:Device Types / Video Device / Parameters / Common parameters}).
+
+`object`
+: represents an object exported from another virtio device<!-- as defined in \ref{sec:Basic Facilities of a Virtio Device / Exporting Objects} -->. This variant can be used when the `mem_type` member of the `virtio_video_params_resources` corresponding to the queue is set to VIRTIO_VIDEO_MEM_TYPE_VIRTIO_OBJECT (see \ref{sec:Device Types / Video Device / Parameters / Common parameters}).
+
+The struct `virtio_video_resource_sg_list` is defined as follows:
+
+```
+struct virtio_video_resource_sg_entry {
+        le64 addr;
+        le32 length;
+        u8 padding[4];
+};
+
+struct virtio_video_resource_sg_list {
+        le32 num_entries;
+        u8 padding[4];
+        /* Followed by num_entries instances of
+           video_video_resource_sg_entry */
+};
+```
+
+Within `struct virtio_video_resource_sg_entry`:
+
+`addr`
+: is a guest physical address to the start of the SG entry.
+
+`length`
+: is the length of the SG entry.
+
+Finally, for `struct virtio_video_resource_sg_list`:
+
+`num_entries`
+: is the number of `struct virtio_video_resource_sg_entry` instances that follow.
+
+
+`struct virtio_video_resource_object` is defined as follows:
+
+```
+struct virtio_video_resource_object {
+        u8 uuid[16];
+};
+```
+
+uuid
+: is a version 4 UUID specified by \hyperref[intro:rfc4122]{[RFC4122]}.
+
+The device responds with `struct virtio_video_resource_attach_backing_resp`:
+
+```
+struct virtio_video_resource_attach_backing_resp {
+        le32 result; /* VIRTIO_VIDEO_RESULT_* */
+};
+```
+
+`result`
+: is
+
+    VIRTIO_VIDEO_RESULT_OK
+    : if the operation succeeded,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_STREAM_ID
+    : if the mentioned stream does not exist,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_ARGUMENT
+    : if `queue_type`, `resource_id`, or `resources` have an invalid value,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION
+    : if the operation is performed at a time when it is non-valid.
+
+VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING can only be called during the following times:
+
+* AFTER a VIRTIO_VIDEO_CMD_STREAM_CREATE and BEFORE invoking VIRTIO_VIDEO_CMD_RESOURCE_QUEUE for the first time on the resource,
+* AFTER successfully changing the `virtio_video_params_resources` parameter corresponding to the queue and BEFORE VIRTIO_VIDEO_CMD_RESOURCE_QUEUE is called again on the resource.
+
+This is to ensure that the device can rely on the fact that a given resource will always point to the same memory for as long as it may be used by the video device. For instance, a decoder may use returned decoded frames as reference for future frames and won't overwrite the backing resource of a frame that is being referenced. It is only before a stream is started and after a Dynamic Resolution Change event has occurred that we can be sure that all resources won't be used in that way.
+
+##### Driver requirements
+
+`cmd_type` MUST be set to VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING by the driver.
+
+`stream_id` MUST be set to a valid stream ID previously returned by VIRTIO_VIDEO_CMD_STREAM_CREATE.
+
+`queue_type` MUST be set to a valid queue type.
+
+`resource_id` MUST be an integer inferior to the number of resources currently allocated for the queue.
+
+The length of the `resources` array of `struct virtio_video_resource_attach_backing` MUST be equal to the number of resources required by the format currently set on the queue, as described in \ref{sec:Device Types / Video Device / Supported formats}.
+
+##### Device requirements
+
+At any time other than the times valid for calling this command, the device MUST return VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION.
+
+#### VIRTIO_VIDEO_CMD_RESOURCE_QUEUE
+
+Add a resource to the device's queue.
+
+```
+#define VIRTIO_VIDEO_MAX_PLANES                    8
+
+#define VIRTIO_VIDEO_ENQUEUE_FLAG_FORCE_KEY_FRAME  (1 << 0)
+
+struct virtio_video_resource_queue {
+        le32 cmd_type; /* VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING */
+        le32 stream_id;
+        le32 queue_type; /* VIRTIO_VIDEO_QUEUE_TYPE_* */
+        le32 resource_id;
+        le32 flags; /* Bitmask of VIRTIO_VIDEO_ENQUEUE_FLAG_* */
+        u8 padding[4];
+        le64 timestamp;
+        le32 data_sizes[VIRTIO_VIDEO_MAX_PLANES];
+};
+```
+
+`stream_id`
+: is the ID of a valid stream.
+
+`queue_type`
+: is the direction of the queue.
+
+`resource_id`
+: is the ID of the resource to be queued.
+
+`flags`
+: is a bitmask of VIRTIO_VIDEO_ENQUEUE_FLAG_* values.
+
+    `VIRTIO_VIDEO_ENQUEUE_FLAG_FORCE_KEY_FRAME`
+    : The submitted frame is to be encoded as a key frame. Only valid for the encoder's INPUT queue.
+
+`timestamp`
+: is an abstract sequence counter that can be used on the INPUT queue for synchronization. Resources produced on the output queue will carry the `timestamp` of the input resource they have been produced from.
+
+`data_sizes`
+: number of data bytes used for each plane. Set by the driver for input resources.
+
+The device responds with `struct virtio_video_resource_queue_resp`:
+
+```
+#define VIRTIO_VIDEO_DEQUEUE_FLAG_ERR           (1 << 0)
+/* Encoder only */
+#define VIRTIO_VIDEO_DEQUEUE_FLAG_KEY_FRAME     (1 << 1)
+#define VIRTIO_VIDEO_DEQUEUE_FLAG_P_FRAME       (1 << 2)
+#define VIRTIO_VIDEO_DEQUEUE_FLAG_B_FRAME       (1 << 3)
+
+struct virtio_video_resource_queue_resp {
+        le32 result;
+        le32 flags;
+        le64 timestamp;
+        le32 data_sizes[VIRTIO_VIDEO_MAX_PLANES];
+};
+```
+
+`result`
+: is
+
+    VIRTIO_VIDEO_RESULT_OK
+    : if the operation succeeded,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_STREAM_ID
+    : if the requested stream does not exist,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_ARGUMENT
+    : if the `queue_type`, `resource_id` or `flags` parameters have an invalid value,
+
+    VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION
+    : if VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING has not been successfully called on the resource prior to queueing it.
+
+    VIRTIO_VIDEO_RESULT_ERR_CANCELED
+    : if the resource has not been processed, not because of an error but because of a change in the state of the codec. The driver is expected to take action and address the condition before submitting the resource again.
+
+`flags`
+: is a bitmask of VIRTIO_VIDEO_DEQUEUE_FLAG_* flags.
+
+    VIRTIO_VIDEO_DEQUEUE_FLAG_ERR
+    : is set on output resources when a non-fatal processing error has happened and the data contained by the resource is likely to be corrupted,
+
+    VIRTIO_VIDEO_DEQUEUE_FLAG_KEY_FRAME
+    : is set on output resources when the resource contains an encoded key frame (only for encoders).
+
+    VIRTIO_VIDEO_DEQUEUE_FLAG_P_FRAME
+    : is set on output resources when the resource contains only differences to a previous key frame (only for encoders).
+
+    VIRTIO_VIDEO_DEQUEUE_FLAG_B_FRAME
+    : is set on output resources when the resource contains only the differences between the current frame and both the preceding and following key frames (only for encoders).
+
+`timestamp`
+: is set on output resources to the `timestamp` value of the input resource that produced the resource.
+
+`data_sizes`
+: is set on output resources to the amount of data written by the device, for each plane.
+
+##### Driver requirements
+
+`cmd_type` MUST be set to VIRTIO_VIDEO_CMD_RESOURCE_QUEUE by the driver.
+
+`stream_id` MUST be set to a valid stream ID previously returned by VIRTIO_VIDEO_CMD_STREAM_CREATE.
+
+`queue_type` MUST be set to a valid queue type.
+
+`resource_id` MUST be an integer inferior to the number of resources currently allocated for the queue.
+
+The driver MUST account for the fact that the response to this command might come out-of-order (i.e. after other commands sent to the device), and that it can be interrupted.
+
+##### Device Requirements
+
+The device MUST mark output resources that might contain corrupted content due to and error with the VIRTIO_VIDEO_BUFFER_FLAG_ERR flag.
+
+For output resources, the device MUST copy the `timestamp` parameter of the input resource that produced it into its response.
+
+In case of encoder, the device MUST mark each output resource with one of VIRTIO_VIDEO_DEQUEUE_FLAG_KEY_FRAME, VIRTIO_VIDEO_DEQUEUE_FLAG_P_FRAME, or VIRTIO_VIDEO_DEQUEUE_FLAG_B_FRAME.
+
+If the processing of a resource was stopped due to a stream event, a VIRTIO_VIDEO_CMD_STREAM_STOP, or a VIRTIO_VIDEO_CMD_STREAM_DESTROY, the device MUST set \field{result} to VIRTIO_VIDEO_RESULT_ERR_CANCELED.
+
+<!-- The driver and device MUST follow requirements about buffer ownership explained in \ref{sec:Device Types / Video Device / Device Operation / Buffer lifecycle}. -->
+
+### Device Operation: Event Virtqueue
+
+The eventq is used by the device to signal stream events that are not a direct result of a command queued by the driver on the commandq. Since these events affect the device operation, the driver is expected to react to them and resume streaming afterwards.
+
+There are currently two supported events: device error, and Dynamic Resolution Change.
+
+```
+#define VIRTIO_VIDEO_EVENT_ERROR    1
+#define VIRTIO_VIDEO_EVENT_DRC      2
+
+union virtio_video_event {
+        le32 event_type /* One of VIRTIO_VIDEO_EVENT_* */
+        struct virtio_video_event_err err;
+        struct virtio_video_event_drc drc;
+}
+```
+
+#### Driver requirements
+
+The driver MUST at any time have at least one descriptor with a used buffer large enough to contain a `struct virtio_video_event` queued on the eventq.
+
+#### Error Event
+
+The error event is queued by the device when an unrecoverable error occurred during processing. The stream is considered invalid from that point and is automatically closed. Pending VIRTIO_VIDEO_CMD_STREAM_DRAIN and VIRTIO_VIDEO_CMD_RESOURCE_QUEUE commands are canceled, and further commands will fail with VIRTIO_VIDEO_RESULT_INVALID_STREAM_ID.
+
+Note that this is different from dequeued resources carrying the VIRTIO_VIDEO_DEQUEUE_FLAG_ERR flag. This flag indicates that the output might be corrupted, but the stream in itself can continue and might recover.
+
+This event should only be used for catastrophic errors, e.g. a host driver failure that cannot be recovered.
+
+#### Dynamic Resolution Change Event
+
+A Dynamic Resolution Change (or DRC) event happens when a decoder device detects that the resolution of the stream being decoded has changed. This event is emitted after processing all the input resources preceding the resolution change, and as a result all the output resources corresponding to these pre-DRC input resources are available to the driver by the time it receives the DRC event.
+
+A DRC event automatically detaches the backing memory of all output resources. Upon receiving the DRC event and processing all pending output resources, the driver is responsible for querying the new output resolution and re-attaching suitable backing memory to the output resources before queueing them again. Streaming resumes when the first output resource is queued with memory properly attached.
+
+##### Device Requirements
+
+The device MUST make all the output resources that correspond to frames before the resolution change point available to the driver BEFORE it sends the resolution change event to the driver.
+
+After the event is emitted, the device MUST reject all output resources for which VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING has not been successfully called again with VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION.
+
+##### Driver Requirements
+
+The driver MUST query the new output resolution parameter and call VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING with suitable memory for each output resource before queueing them again.
+
+## Parameters
+
+Parameters allow the driver to configure the device for the decoding or encoding operation.
+
+<!-- TODO See b/241492607 -->
+
+The `union virtio_video_stream_params` is defined as follows:
+
+```
+/* Common parameters */
+#define VIRTIO_VIDEO_PARAMS_INPUT_RESOURCES             0x001
+#define VIRTIO_VIDEO_PARAMS_OUTPUT_RESOURCES            0x002
+
+/* Decoder-only parameters */
+#define VIRTIO_VIDEO_PARAMS_DECODER_INPUT_FORMAT        0x101
+#define VIRTIO_VIDEO_PARAMS_DECODER_OUTPUT_FORMAT       0x102
+
+/* Encoder-only parameters */
+#define VIRTIO_VIDEO_PARAMS_ENCODER_INPUT_FORMAT        0x201
+#define VIRTIO_VIDEO_PARAMS_ENCODER_OUTPUT_FORMAT       0x202
+#define VIRTIO_VIDEO_PARAMS_ENCODER_BITRATE             0x203
+
+union virtio_video_stream_params {
+        /* Common parameters */
+        struct virtio_video_params_resources input_resources;
+        struct virtio_video_params_resources output_resources;
+
+        /* Decoder-only parameters */
+        struct virtio_video_params_bitstream_format decoder_input_format;
+        struct virtio_video_params_image_format decoder_output_format;
+
+        /* Encoder-only parameters */
+        struct virtio_video_params_image_format encoder_input_format;
+        struct virtio_video_params_bitstream_format encoder_output_format;
+        struct virtio_video_params_bitrate encoder_bitrate;
+};
+```
+
+<!-- TODO need codec-specific params, like H264 levels, etc -->
+
+Not all parameters are valid for all devices. For instance, a decoder does not support any of the encoder-only parameters and will return VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION if an unsupported parameter is queried or set.
+
+Each parameter is described in the remainder of this section.
+
+### Driver requirements
+
+After creating a new stream, the initial value of all parameters is undefined to the driver. Thus, the driver MUST NOT assume the default value of any parameter and MUST use VIRTIO_VIDEO_CMD_STREAM_GET_PARAM in order to get the values of the parameters is needs.
+
+The driver SHOULD modify parameters by first calling VIRTIO_VIDEO_CMD_STREAM_GET_PARAM to get the current value of the parameter it wants to modify, alter it and submit the desired value using VIRTIO_VIDEO_CMD_STREAM_SET_PARAM, then checking the actual value set to the parameter in the response of VIRTIO_VIDEO_CMD_STREAM_SET_PARAM.
+
+### Device requirements
+
+The device MUST initialize each parameter to a valid default value and allow each parameter to be read even without the driver explicitly setting a value for it.
+
+### Common parameters
+
+`struct virtio_video_params_resources` is used to control the number of resources and their backing memory type for the INPUT and OUTPUT queues:
+
+```
+#define VIRTIO_VIDEO_MEM_TYPE_GUEST_PAGES       0x1
+#define VIRTIO_VIDEO_MEM_TYPE_VIRTIO_OBJECT     0x2
+
+struct virtio_video_params_resources {
+        le32 min_resources;
+        le32 max_resources;
+        le32 num_resources;
+        u8 mem_type; /* VIRTIO_VIDEO_MEM_TYPE_* */
+        u8 padding[3];
+}
+```
+
+`min_resources`
+: is the minimum number of resources that the queue supports for the current settings. Cannot be modified by the driver.
+
+`max_resources`
+: is the maximum number of resources that the queue supports for the current settings. Cannot be modified by the driver.
+
+`num_resources`
+: is the number of resources that can be addressed for the queue, numbered from $0$ to $num\_queue - 1$. Can be equal to zero if no resources are allocated, otherwise will be comprised between `min_resources` and `max_resources`.
+
+`mem_type`
+: is the memory type that will be used to back these resources.
+
+Successfully setting this parameter results in all currently attached resources of the corresponding queue to become detached, i.e. the driver cannot queue a resource to the queue without attaching some backing memory first. All currently queued resources for the queue are returned with the VIRTIO_VIDEO_RESULT_ERR_CANCELED error before the response to the VIRTIO_VIDEO_CMD_STREAM_SET_PARAM is returned.
+
+This parameter can only be changed during the following times:
+
+* After creating a stream and before queuing any resource on a given queue,
+* For the INPUT queue, after receiving the reponse to a VIRTIO_VIDEO_CMD_STREAM_STOP and before queueing any input resource,
+* For the OUTPUT queue, after receiving a DRC event and before queueing any output resource.
+
+Attempts to change this parameter outside of these times will result in VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION to be returned.
+
+### Format parameters
+
+The format of the input and output queues are defined using the `virtio_video_params_bitstream_format` and `virtio_video_params_image_format`. Which one applies to the input or output queue depends on whether the device is a decoder or an encoder.
+
+Bitstream formats are set using the `virtio_video_params_bitstream_format` struct:
+
+```
+struct virtio_video_params_bitstream_format {
+        u8 fourcc[4];
+        le32 buffer_size;
+}
+```
+
+`fourcc`
+: is the fourcc of the bitstream format. For a list of supported formats, see \ref{sec:Device Types / Video Device / Supported formats / Bitstream formats}.
+
+`buffer_size`
+: is the minimum size of the buffers that will back resources to be queued.
+
+
+Image formats are set using the `virtio_video_params_image_format` struct:
+
+```
+struct virtio_video_rect {
+        le32 left;
+        le32 top;
+        le32 width;
+        le32 height;
+}
+
+struct virtio_video_plane_format {
+        le32 buffer_size;
+        le32 stride;
+        le32 offset;
+        u8 padding[4];
+}
+
+struct virtio_video_params_image_format {
+        u8 fourcc[4];
+        le32 width;
+        le32 height;
+        u8 padding[4];
+        struct virtio_video_rect crop;
+        struct virtio_video_plane_format planes[VIRTIO_VIDEO_MAX_PLANES];
+}
+```
+
+`fourcc`
+: is the fourcc of the image format. For a list of supported formats, see \ref{sec:Device Types / Video Device / Supported formats / Image formats}.
+
+`width`
+: is the width in pixels of the coded image.
+
+`height`
+: is the height in pixels of the coded image.
+
+`crop`
+: is the rectangle covering the visible size of the frame, i.e the part of the frame that should be displayed.
+
+`planes`
+: is the format description of each individual plane making this format. The number of planes is dependent on the `fourcc` and detailed in \ref{sec:Device Types / Video Device / Supported formats / Image formats}.
+
+    `buffer_size`
+    : is the minimum size of the buffers that will back resources to be queued.
+
+    `stride`
+    : is the distance in bytes between two lines of data.
+
+    `offset`
+    : is the starting offset for the data in the buffer.
+
+#### Device requirements
+
+The device MAY adjust any requested parameter to the nearest-supported value if the requested one is not suitable. For instance, an encoder device may decide that it needs more larger output buffers in order to encode at the requested format and resolution.
+
+#### Driver requirements
+
+When setting a format parameter, the driver MUST check the adjusted returned value and comply with it, or try to set a different one if it cannot.
+
+<!-- TODO for the decoder, resolution can be set manually by the driver (useful for codecs that do not embed this information). When this is done, an implicit drain is triggered and the reply to the SET_CONTROL command is only sent after the drain is completed by the device. Upon receiving the reply from the SET_CONTROL, the driver can reallocate the output buffers and assign their backing memory. -->
+
+### Encoder parameters
+
+```
+struct virtio_video_params_bitrate {
+    le32 min_bitrate;
+    le32 max_bitrate;
+    le32 bitrate;
+    u8 padding[4];
+}
+```
+
+`min_bitrate`
+: is the minimum bitrate supported by the encoder for the current settings. Ignored when setting the parameter.
+
+`max_bitrate`
+: is the maximum bitrate supported by the encoder for the current settings. Ignored when setting the parameter.
+
+`bitrate_`
+: is the current desired bitrate for the encoder.
+
+## Supported formats
+
+Bitstream and image formats are identified by their fourcc code, which is a four-bytes ASCII sequence uniquely identifying the format and its properties.
+
+### Bitstream formats
+
+The fourcc code of each supported bitstream format is given, as well as the unit of data requested in each input resource for the decoder, or produced in each output resource for the encoder.
+
+`MPG2`
+: MPEG2 encoded stream. One Access Unit per resource.
+
+`H264`
+: H.264 encoded stream. One NAL unit per resource.
+
+`HEVC`
+: HEVC encoded stream. One NAL unit per resource.
+
+`VP80`
+: VP8 encoded stream. One frame per resource.
+
+`VP90`
+: VP9 encoded stream. One frame per resource.
+
+### Image formats
+
+The fourcc code of each supported image format is given, as well as its number of planes, physical buffers, and eventual subsampling.
+
+`RGB3`
+: one RGB plane where each component takes one byte, i.e. 3 bytes per pixel.
+
+`NV12`
+: one Y plane followed by interleaved U and V data, in a single buffer. 4:2:0 subsampling.
+
+`NV12`
+: same as `NV12` but using two separate buffers for the Y and UV planes.
+
+`YU12`
+: one Y plane followed by one Cb plane, followed by one Cr plane, in a single buffer. 4:2:0 subsampling.
+
+`YM12`
+: same as `YU12` but using three separate buffers for the Y, U and V planes.
