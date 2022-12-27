@@ -81,6 +81,8 @@ Before resources can be submitted to a queue, backing memory must be attached to
 
 The INPUT and OUTPUT queues are effectively independent, and the driver can fill them without caring about the other queue. In particular there is no need to queue input and output resources in pairs: one input resource can result in zero to many output resources being produced.
 
+In the case of a decoder device, the decoded frames are made available on the OUTPUT queue in presentation order.
+
 Resources are queued to the INPUT or OUTPUT queue using the VIRTIO_VIDEO_CMD_RESOURCE_QUEUE command. The device replies to this command when an input resource has been fully processed and can be reused by the driver, or when an output resource has been filled by the device as a result of processing.
 
 Parameters of the stream can be obtained and configured using VIRTIO_VIDEO_CMD_STREAM_GET_PARAM and VIRTIO_VIDEO_CMD_STREAM_SET_PARAM. Available parameters depend on the device type and are detailed in section \ref{sec:Device Types / Video Device / Parameters}.
@@ -409,7 +411,7 @@ The device MUST return VIRTIO_VIDEO_RESULT_ERR_CANCELED to any pending VIRTIO_VI
 
 The device MUST interrupt operation as quickly as possible, and not be dependent on output resources being queued by the driver.
 
-Upon resuming processing, the device CAN skip input data until it finds a point that allows it to resume operation properly (e.g. until a keyframe is found in the input stream of a decoder).
+Upon resuming processing, the device MAY skip input data until it finds a point that allows it to resume operation properly (e.g. until a keyframe is found in the input stream of a decoder).
 
 #### VIRTIO_VIDEO_CMD_STREAM_GET_PARAM
 
@@ -1022,7 +1024,7 @@ struct virtio_video_params_bitrate {
 : is the maximum bitrate supported by the encoder for the current settings. Ignored when setting the parameter.
 
 `bitrate`
-: is the current desired bitrate for the encoder.
+: is the current desired bitrate for the encoder. This can be changed at any moment by the driver and will apply to subsequently submitted frames.
 
 ## Supported formats
 
@@ -1030,38 +1032,24 @@ Bitstream and image formats are identified by their fourcc code, which is a four
 
 ### Bitstream formats
 
-The fourcc code of each supported bitstream format is given, as well as the unit of data requested in each input resource for the decoder, or produced in each output resource for the encoder.
+The fourcc of bitstream formats, as well as the expected data unit per bitstream buffer, follow the "Compressed Formats" of V4L2: https://docs.kernel.org/userspace-api/media/v4l/pixfmt-compressed.html
 
-`MPG2`
-: MPEG2 encoded stream. One Access Unit per resource.
+The supported fourccs are:
 
-`H264`
-: H.264 encoded stream. One NAL unit per resource.
-
-`HEVC`
-: HEVC encoded stream. One NAL unit per resource.
-
-`VP80`
-: VP8 encoded stream. One frame per resource.
-
-`VP90`
-: VP9 encoded stream. One frame per resource.
+- `MPG2`
+- `H264`
+- `HEVC`
+- `VP80`
+- `VP90`
 
 ### Image formats
 
-The fourcc code of each supported image format is given, as well as its number of planes, physical buffers, and eventual subsampling.
+The fourcc and layout of image formats follow the "Image Formats" of V4L2: https://docs.kernel.org/userspace-api/media/v4l/pixfmt-compressed.html
 
-`RGB3`
-: one RGB plane where each component takes one byte, i.e. 3 bytes per pixel.
+The supported fourccs are:
 
-`NV12`
-: one Y plane followed by interleaved U and V data, in a single buffer. 4:2:0 subsampling.
-
-`NM12`
-: same as `NV12` but using two separate buffers for the Y and UV planes.
-
-`YU12`
-: one Y plane followed by one Cb plane, followed by one Cr plane, in a single buffer. 4:2:0 subsampling.
-
-`YM12`
-: same as `YU12` but using three separate buffers for the Y, U and V planes.
+- `RGB3`
+- `NV12`
+- `NM12`
+- `YU12`
+- `YM12`
