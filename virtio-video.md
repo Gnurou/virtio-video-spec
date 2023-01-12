@@ -110,10 +110,10 @@ Different structures are used for each command and response. A command structure
 /* Stream */
 #define VIRTIO_VIDEO_CMD_STREAM_CREATE           0x200
 #define VIRTIO_VIDEO_CMD_STREAM_DESTROY          0x201
-#define VIRTIO_VIDEO_CMD_STREAM_DRAIN            0x203
-#define VIRTIO_VIDEO_CMD_STREAM_RESET            0x204
-#define VIRTIO_VIDEO_CMD_STREAM_GET_PARAM        0x205
-#define VIRTIO_VIDEO_CMD_STREAM_SET_PARAM        0x206
+#define VIRTIO_VIDEO_CMD_STREAM_DRAIN            0x202
+#define VIRTIO_VIDEO_CMD_STREAM_RESET            0x203
+#define VIRTIO_VIDEO_CMD_STREAM_GET_PARAM        0x204
+#define VIRTIO_VIDEO_CMD_STREAM_SET_PARAM        0x205
 
 /* Resource*/
 #define VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING 0x400
@@ -356,6 +356,8 @@ The driver MUST send a DRAIN command when it does not have any further input, in
 
 Before the device sends the response, it MUST process and respond to all the VIRTIO_VIDEO_CMD_RESOURCE_QUEUE commands on the INPUT queue that were sent before the drain command, and make all the corresponding output resources available to the driver by responding to their VIRTIO_VIDEO_CMD_RESOURCE_QUEUE command.
 
+The device MUST be able to accept input work while a drain is ongoing, but the output of this work MUST NOT be made available before the response to the drain command.
+
 While the device is processing the command, it MUST return VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION to the VIRTIO_VIDEO_CMD_STREAM_DRAIN command.
 
 If the command is interrupted due to a VIRTIO_VIDEO_CMD_STREAM_RESET or VIRTIO_VIDEO_CMD_STREAM_DESTROY operation, the device MUST respond with VIRTIO_VIDEO_RESULT_ERR_CANCELED.
@@ -597,10 +599,10 @@ struct virtio_video_resource_sg_list {
 Within `struct virtio_video_resource_sg_entry`:
 
 `addr`
-: is a guest physical address to the start of the SG entry.
+: is a guest physical address to the start of the SG entry. Must be aligned to the size of physical guest pages.
 
 `length`
-: is the length of the SG entry.
+: is the length of the SG entry in bytes.
 
 Finally, for `struct virtio_video_resource_sg_list`:
 
@@ -700,7 +702,7 @@ struct virtio_video_resource_queue {
     : The submitted frame is to be encoded as a key frame. Only valid for the encoder's INPUT queue.
 
 `timestamp`
-: is an abstract sequence counter that can be used on the INPUT queue for synchronization. Resources produced on the output queue will carry the `timestamp` of the input resource they have been produced from.
+: is an abstract sequence counter that can be used on the INPUT queue for synchronization. Resources produced on the output queue will carry the `timestamp` of the first input resource they have been produced from.
 
 `data_sizes`
 : number of data bytes used for each plane. Set by the driver for input resources.

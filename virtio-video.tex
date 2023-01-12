@@ -129,6 +129,9 @@ can fill them without caring about the other queue. In particular there
 is no need to queue input and output resources in pairs: one input
 resource can result in zero to many output resources being produced.
 
+In the case of a decoder device, the decoded frames are made available
+on the OUTPUT queue in presentation order.
+
 Resources are queued to the INPUT or OUTPUT queue using the
 VIRTIO_VIDEO_CMD_RESOURCE_QUEUE command. The device replies to this
 command when an input resource has been fully processed and can be
@@ -174,10 +177,10 @@ structure starts with the requested command code, defined as follows:
 /* Stream */
 #define VIRTIO_VIDEO_CMD_STREAM_CREATE           0x200
 #define VIRTIO_VIDEO_CMD_STREAM_DESTROY          0x201
-#define VIRTIO_VIDEO_CMD_STREAM_DRAIN            0x203
-#define VIRTIO_VIDEO_CMD_STREAM_RESET            0x204
-#define VIRTIO_VIDEO_CMD_STREAM_GET_PARAM        0x205
-#define VIRTIO_VIDEO_CMD_STREAM_SET_PARAM        0x206
+#define VIRTIO_VIDEO_CMD_STREAM_DRAIN            0x202
+#define VIRTIO_VIDEO_CMD_STREAM_RESET            0x203
+#define VIRTIO_VIDEO_CMD_STREAM_GET_PARAM        0x204
+#define VIRTIO_VIDEO_CMD_STREAM_SET_PARAM        0x205
 
 /* Resource*/
 #define VIRTIO_VIDEO_CMD_RESOURCE_ATTACH_BACKING 0x400
@@ -480,6 +483,10 @@ were sent before the drain command, and make all the corresponding
 output resources available to the driver by responding to their
 VIRTIO_VIDEO_CMD_RESOURCE_QUEUE command.
 
+The device MUST be able to accept input work while a drain is ongoing,
+but the output of this work MUST NOT be made available before the
+response to the drain command.
+
 While the device is processing the command, it MUST return
 VIRTIO_VIDEO_RESULT_ERR_INVALID_OPERATION to the
 VIRTIO_VIDEO_CMD_STREAM_DRAIN command.
@@ -561,7 +568,7 @@ affected.
 The device MUST interrupt operation as quickly as possible, and not be
 dependent on output resources being queued by the driver.
 
-Upon resuming processing, the device CAN skip input data until it finds
+Upon resuming processing, the device MAY skip input data until it finds
 a point that allows it to resume operation properly (e.g.~until a
 keyframe is found in the input stream of a decoder).
 
@@ -786,9 +793,10 @@ Within \field{struct virtio_video_resource_sg_entry}:
 
 \begin{description}
 \item[\field{addr}]
-is a guest physical address to the start of the SG entry.
+is a guest physical address to the start of the SG entry. Must be
+aligned to the size of physical guest pages.
 \item[\field{length}]
-is the length of the SG entry.
+is the length of the SG entry in bytes.
 \end{description}
 
 Finally, for \field{struct virtio_video_resource_sg_list}:
@@ -921,7 +929,8 @@ encoder's INPUT queue.
 \item[\field{timestamp}]
 is an abstract sequence counter that can be used on the INPUT queue for
 synchronization. Resources produced on the output queue will carry the
-\field{timestamp} of the input resource they have been produced from.
+\field{timestamp} of the first input resource they have been produced
+from.
 \item[\field{data_sizes}]
 number of data bytes used for each plane. Set by the driver for input
 resources.
@@ -1347,7 +1356,9 @@ settings. Ignored when setting the parameter.
 is the maximum bitrate supported by the encoder for the current
 settings. Ignored when setting the parameter.
 \item[\field{bitrate}]
-is the current desired bitrate for the encoder.
+is the current desired bitrate for the encoder. This can be changed at
+any moment by the driver and will apply to subsequently submitted
+frames.
 \end{description}
 
 \subsection{Supported formats}\label{sec:Device Types / Video Device / Supported formats}
@@ -1358,42 +1369,42 @@ properties.
 
 \subsubsection{Bitstream formats}\label{sec:Device Types / Video Device / Supported formats / Bitstream formats}
 
-The fourcc code of each supported bitstream format is given, as well as
-the unit of data requested in each input resource for the decoder, or
-produced in each output resource for the encoder.
+The fourcc of bitstream formats, as well as the expected data unit per
+bitstream buffer, follow the ``Compressed Formats'' of V4L2:
+https://docs.kernel.org/userspace-api/media/v4l/pixfmt-compressed.html
 
-\begin{description}
-\item[\field{MPG2}]
-MPEG2 encoded stream. One Access Unit per resource.
-\item[\field{H264}]
-H.264 encoded stream. One NAL unit per resource.
-\item[\field{HEVC}]
-HEVC encoded stream. One NAL unit per resource.
-\item[\field{VP80}]
-VP8 encoded stream. One frame per resource.
-\item[\field{VP90}]
-VP9 encoded stream. One frame per resource.
-\end{description}
+The supported fourccs are:
+
+\begin{itemize}
+\item
+  \field{MPG2}
+\item
+  \field{H264}
+\item
+  \field{HEVC}
+\item
+  \field{VP80}
+\item
+  \field{VP90}
+\end{itemize}
 
 \subsubsection{Image formats}\label{sec:Device Types / Video Device / Supported formats / Image formats}
 
-The fourcc code of each supported image format is given, as well as its
-number of planes, physical buffers, and eventual subsampling.
+The fourcc and layout of image formats follow the ``Image Formats'' of
+V4L2:
+https://docs.kernel.org/userspace-api/media/v4l/pixfmt-compressed.html
 
-\begin{description}
-\item[\field{RGB3}]
-one RGB plane where each component takes one byte, i.e.~3 bytes per
-pixel.
-\item[\field{NV12}]
-one Y plane followed by interleaved U and V data, in a single buffer.
-4:2:0 subsampling.
-\item[\field{NM12}]
-same as \field{NV12} but using two separate buffers for the Y and UV
-planes.
-\item[\field{YU12}]
-one Y plane followed by one Cb plane, followed by one Cr plane, in a
-single buffer. 4:2:0 subsampling.
-\item[\field{YM12}]
-same as \field{YU12} but using three separate buffers for the Y, U and V
-planes.
-\end{description}
+The supported fourccs are:
+
+\begin{itemize}
+\item
+  \field{RGB3}
+\item
+  \field{NV12}
+\item
+  \field{NM12}
+\item
+  \field{YU12}
+\item
+  \field{YM12}
+\end{itemize}
