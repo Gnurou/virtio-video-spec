@@ -55,7 +55,7 @@ struct virtio_video_config {
 ```
 
 `caps_length`
-: is the minumum length in bytes that a device-writable buffer must  have in order to receive the response to VIRTIO_VIDEO_CMD_DEVICE_QUERY_CAPS.
+: is the minimum length in bytes that a device-writable buffer must  have in order to receive the response to VIRTIO_VIDEO_CMD_DEVICE_QUERY_CAPS.
 
 ### Device Requirements
 
